@@ -1,0 +1,5 @@
+{
+  "name": "DocBlock",
+  "description": "A secure application for medical professionals to log and search for warnings about potentially violent or disruptive patients, enhancing safety in healthcare environments. The app uses AI to validate reports and provides up-to-date information through Google Search grounding.",
+  "requestFramePermissions": []
+}
