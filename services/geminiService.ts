@@ -1,11 +1,96 @@
-import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
+import { GenerateContentResponse, GoogleGenAI, Type } from "@google/genai";
 import { GroundingSource } from '../types';
 
-if (!process.env.API_KEY) {
-  throw new Error("API_KEY environment variable not set");
+// --- API key management and failover ---
+
+// Vite injects these at build time; at runtime they are plain strings, not real process.env lookups.
+const rawKeyEnv = (process.env.API_KEY || process.env.GEMINI_API_KEY || "").trim();
+
+if (!rawKeyEnv) {
+    throw new Error("GEMINI_API_KEY / API_KEY environment variable not set");
 }
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const allKeys = rawKeyEnv
+    .split(',')
+    .map(k => k.trim())
+    .filter(Boolean);
+
+if (allKeys.length === 0) {
+    throw new Error("No Gemini API keys configured");
+}
+
+// Mutable list of keys that are still considered healthy.
+let activeKeys = [...allKeys];
+
+const hasActiveKeys = () => activeKeys.length > 0;
+const getActiveKeysSnapshot = () => [...activeKeys];
+const disableKey = (key: string) => {
+    activeKeys = activeKeys.filter(k => k !== key);
+    console.warn("Disabling Gemini API key due to repeated errors");
+    if (!activeKeys.length) {
+        console.error("All Gemini API keys have been disabled.");
+    }
+};
+
+const shouldDisableKey = (err: unknown): boolean => {
+    if (typeof err !== 'object' || err === null) return false;
+    const anyErr = err as any;
+    const status = anyErr.status ?? anyErr.code;
+
+    if (typeof status === 'number') {
+        // Typical permanent / quota-related failures
+        if (status === 400 || status === 401 || status === 403 || status === 429) {
+            return true;
+        }
+    }
+
+    const message = typeof anyErr.message === 'string' ? anyErr.message.toLowerCase() : '';
+    if (message) {
+        if (
+            message.includes('api key') ||
+            (message.includes('invalid') && message.includes('key')) ||
+            message.includes('unauthorized') ||
+            message.includes('permission') ||
+            message.includes('quota') ||
+            message.includes('rate limit')
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+};
+
+const executeWithFailover = async <T>(
+    operation: (client: GoogleGenAI, key: string) => Promise<T>
+): Promise<T> => {
+    if (!hasActiveKeys()) {
+        throw new Error("No active Gemini API keys available");
+    }
+
+    const keysSnapshot = getActiveKeysSnapshot();
+    let lastError: unknown = null;
+
+    for (const key of keysSnapshot) {
+        const client = new GoogleGenAI({ apiKey: key });
+
+        try {
+            return await operation(client, key);
+        } catch (err) {
+            lastError = err;
+            console.warn("Gemini request failed for one API key; trying next key...", err);
+
+            if (shouldDisableKey(err)) {
+                disableKey(key);
+            }
+
+            // Continue silently with the next key.
+        }
+    }
+
+    // If we reach here, all keys failed for this request.
+    throw lastError ?? new Error("All Gemini API keys failed");
+};
 
 interface AnalysisResult {
   isValid: boolean;
@@ -19,10 +104,11 @@ interface AnalysisResult {
  */
 export const analyzeWarningReason = async (reason: string): Promise<AnalysisResult> => {
   try {
-    const response = await ai.models.generateContent({
-        model: "gemini-2.5-pro",
-        contents: `Analyze the following reason for a patient warning and determine if it's a valid and objective threat to medical staff. Reason: "${reason}"`,
-        config: {
+        return await executeWithFailover<AnalysisResult>(async (ai) => {
+            const response = await ai.models.generateContent({
+                model: "gemini-2.5-pro",
+                contents: `Analyze the following reason for a patient warning and determine if it's a valid and objective threat to medical staff. Reason: "${reason}"`,
+                config: {
             systemInstruction: `شما یک متخصص بسیار دقیق و **شکاک** در زمینه اخلاق پزشکی و امنیت کادر درمان هستید. وظیفه شما تحلیل گزارش یک پزشک در مورد بیمار برای ثبت در یک سیستم هشدار است.
 
 **معیارهای تحلیل:**
@@ -51,20 +137,21 @@ export const analyzeWarningReason = async (reason: string): Promise<AnalysisResu
 - **اگر گزارش معتبر است (\`isValid: true\`):** دلیل تایید را به طور خلاصه بنویسید.
 - **اگر گزارش به دلیل ناکافی بودن جزئیات یا تناقض منطقی رد می‌شود (\`isValid: false\`):** در \`analysis\` به طور مشخص توضیح دهید که **کدام جزئیات باید اضافه شوند یا کدام بخش از گزارش غیرمنطقی است و نیاز به اصلاح دارد.** مثلا: "ادعای 'کشته شدن' شما از نظر منطقی صحیح نیست. لطفاً توضیح دهید که آیا بیمار شما را تهدید به مرگ کرده است و جزئیات دقیق ماجرا را شرح دهید."
 - **اگر گزارش به دلیل نامعتبر بودن محتوا رد می‌شود (\`isValid: false\`):** دلیل رد شدن را به وضوح توضیح دهید. مثلا: "این مورد به نظر یک اختلاف نظر در مورد روند درمان است و شامل تهدید مستقیم نمی‌شود."`,
-            thinkingConfig: { thinkingBudget: 32768 },
-            tools: [{ googleSearch: {} }],
-        },
-    });
+                thinkingConfig: { thinkingBudget: 32768 },
+                tools: [{ googleSearch: {} }],
+            },
+        });
 
-    // Robustly parse the JSON from the model's text response.
-    let jsonText = response.text.trim();
-    const jsonMatch = jsonText.match(/```(json)?\s*([\s\S]*?)\s*```/);
-    if (jsonMatch && jsonMatch[2]) {
-        jsonText = jsonMatch[2];
-    }
-    
-    const result: AnalysisResult = JSON.parse(jsonText);
-    return result;
+            // Robustly parse the JSON from the model's text response.
+            let jsonText = response.text.trim();
+            const jsonMatch = jsonText.match(/```(json)?\s*([\s\S]*?)\s*```/);
+            if (jsonMatch && jsonMatch[2]) {
+                jsonText = jsonMatch[2];
+            }
+
+            const result: AnalysisResult = JSON.parse(jsonText);
+            return result;
+        });
 
   } catch (error) {
     console.error("Error analyzing warning reason:", error);
@@ -93,19 +180,21 @@ interface PublicInfoResult {
  */
 export const searchPublicInfo = async (patientName: string, patientId: string): Promise<PublicInfoResult> => {
     try {
-        const response: GenerateContentResponse = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: `هرگونه اطلاعات عمومی، گزارش خبری یا سوابق رسمی به زبان فارسی در مورد خشونت، تهدید یا مسائل قانونی بالقوه مربوط به شخصی به نام '${patientName}' با کد ملی '${patientId}' را پیدا کنید. یافته‌های خود را به طور خلاصه جمع‌بندی کنید.`,
-            config: {
-                systemInstruction: `You are an information retrieval assistant. Your task is to find public records about a specific individual. **Crucially**, if your search yields no specific results about the person in question (name and ID), you MUST respond with the exact Persian phrase: 'هیچ اطلاعات عمومی مرتبطی یافت نشد.'. Do not provide any other summary, explanation, or related information. Your entire response must be that exact phrase.`,
-                tools: [{ googleSearch: {} }],
-            },
+        return await executeWithFailover<PublicInfoResult>(async (ai) => {
+            const response: GenerateContentResponse = await ai.models.generateContent({
+                model: "gemini-2.5-flash",
+                contents: `هرگونه اطلاعات عمومی، گزارش خبری یا سوابق رسمی به زبان فارسی در مورد خشونت، تهدید یا مسائل قانونی بالقوه مربوط به شخصی به نام '${patientName}' با کد ملی '${patientId}' را پیدا کنید. یافته‌های خود را به طور خلاصه جمع‌بندی کنید.`,
+                config: {
+                    systemInstruction: `You are an information retrieval assistant. Your task is to find public records about a specific individual. **Crucially**, if your search yields no specific results about the person in question (name and ID), you MUST respond with the exact Persian phrase: 'هیچ اطلاعات عمومی مرتبطی یافت نشد.'. Do not provide any other summary, explanation, or related information. Your entire response must be that exact phrase.`,
+                    tools: [{ googleSearch: {} }],
+                },
+            });
+            
+            const summary = response.text;
+            const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+            
+            return { summary, sources };
         });
-        
-        const summary = response.text;
-        const sources = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-        
-        return { summary, sources };
 
     } catch (error) {
         console.error("Error searching public info:", error);
@@ -129,33 +218,35 @@ interface WithdrawalAnalysisResult {
  */
 export const analyzeWithdrawalReason = async (originalReason: string, withdrawalReason: string): Promise<WithdrawalAnalysisResult> => {
     try {
-        const response = await ai.models.generateContent({
-            model: "gemini-2.5-pro",
-            contents: `A doctor wishes to withdraw a previous warning about a patient.
-            Original Warning Reason: "${originalReason}"
-            Reason for Withdrawal: "${withdrawalReason}"
-            
-            Analyze both reasons and decide if the withdrawal is justified.`,
-            config: {
-                systemInstruction: `شما یک متخصص اخلاق پزشکی و امنیت بیمارستان هستید. وظیفه شما این است که مشروعیت درخواست یک پزشک برای پس گرفتن اخطار بیمار را تعیین کنید.
+        return await executeWithFailover<WithdrawalAnalysisResult>(async (ai) => {
+            const response = await ai.models.generateContent({
+                model: "gemini-2.5-pro",
+                contents: `A doctor wishes to withdraw a previous warning about a patient.
+                Original Warning Reason: "${originalReason}"
+                Reason for Withdrawal: "${withdrawalReason}"
+                
+                Analyze both reasons and decide if the withdrawal is justified.`,
+                config: {
+                    systemInstruction: `شما یک متخصص اخلاق پزشکی و امنیت بیمارستان هستید. وظیفه شما این است که مشروعیت درخواست یک پزشک برای پس گرفتن اخطار بیمار را تعیین کنید.
 - درخواست پس گرفتن را **تأیید کنید** اگر دلیل آن حاکی از سوءتفاهم، یک مسئله یک‌باره حل‌شده، اتهام دروغین یا یک خطای اداری واضح باشد.
 - درخواست را **رد کنید** اگر اخطار اصلی یک تهدید جدی و عینی (مانند خشونت فیزیکی، تهدیدهای معتبر، آزار و اذیت مکرر) را توصیف کرده و دلیل پس گرفتن ضعیف، تحت فشار یا غیرمنطقی به نظر می‌رسد و تهدید اولیه را بی‌اعتبار نمی‌کند. ایمنی کادر درمان اولویت اصلی است.
 - یک تحلیل واضح برای تصمیم خود ارائه دهید.
 - پاسخ خود را فقط و فقط در قالب یک آبجکت JSON به این شکل برگردانید: {"isApproved": boolean, "analysis": "استدلال دقیق خود را در اینجا به زبان فارسی بنویسید."}`,
-                thinkingConfig: { thinkingBudget: 32768 },
-                responseMimeType: "application/json",
-                responseSchema: {
-                    type: Type.OBJECT,
-                    properties: {
-                        isApproved: { type: Type.BOOLEAN },
-                        analysis: { type: Type.STRING }
-                    },
-                    required: ['isApproved', 'analysis']
-                }
-            },
+                    thinkingConfig: { thinkingBudget: 32768 },
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: Type.OBJECT,
+                        properties: {
+                            isApproved: { type: Type.BOOLEAN },
+                            analysis: { type: Type.STRING }
+                        },
+                        required: ['isApproved', 'analysis']
+                    }
+                },
+            });
+            const jsonText = response.text.trim();
+            return JSON.parse(jsonText);
         });
-        const jsonText = response.text.trim();
-        return JSON.parse(jsonText);
     } catch (error) {
         console.error("Error analyzing withdrawal reason:", error);
         return {
