@@ -1,53 +1,36 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# DocBlock
 
-# Run and deploy your AI Studio app
+Safety app for medical professionals: log and search warnings about
+potentially violent or disruptive patients. Reports are AI-validated and
+enriched with up-to-date information through Google Search grounding, so
+front-desk and clinical staff see risk context before the encounter.
 
-This contains everything you need to run your app locally.
+## What's inside
 
-View your app in AI Studio: https://ai.studio/apps/drive/1xM61PBBWqHZNKZP6FwbUGLGTwpsvKSum
+- `App.tsx`, `components/` (Header plus report / search / withdraw flows:
+  `ReportWarning`, `SearchPatient`, `WithdrawWarning`), `context/`,
+  `services/geminiService.ts`, `types.ts`, `Font/`.
+- GitHub Pages deployment configured
+  (`https://K1tvkli.github.io/DocBlock/`, `deploy` script via `gh-pages`).
 
-## Run Locally
+## Tech stack
 
-**Prerequisites:** Node.js and npm
+React 19, Vite 6, TypeScript, `@google/genai` with Search grounding.
+Requires `GEMINI_API_KEY` in a local `.env` file.
 
-1. Install dependencies:
+## Getting started
 
-   `npm install`
-2. Create a `.env` file in the project root (this repo already expects it) and set:
-   - `GEMINI_API_KEY=<your Gemini API key or keys>`
-3. Run the app:
+```bash
+npm install
+npm run dev
+```
 
-   `npm run dev`
+App serves on http://localhost:3000. `npm run build` for production,
+`npm run deploy` to publish to GitHub Pages.
 
-The app will be available on `http://localhost:3000`.
+## Status
 
-## Deploy to GitHub Pages
-
-This project is configured to deploy to GitHub Pages at:
-
-`https://K1tvkli.github.io/DocBlock/`
-
-### One‑time GitHub setup
-
-1. Push this repository to GitHub under the `K1tvkli/DocBlock` repo.
-2. In GitHub, go to **Settings → Pages**.
-3. Set **Source** to the `gh-pages` branch (it will be created on first deploy).
-
-### Deploy from your machine
-
-1. Make sure your `.env` file contains a valid `GEMINI_API_KEY` so the build can access it.
-2. From the project root, run:
-
-   `npm run deploy`
-
-   This will:
-   - Run `npm run build` to produce a static bundle in `dist/`.
-   - Publish the `dist/` folder to the `gh-pages` branch using `npx gh-pages`.
-
-3. After the command completes, GitHub Pages will pick up the new contents of the `gh-pages` branch. Wait a minute and then open:
-
-   `https://K1tvkli.github.io/DocBlock/`
-
-> **Note:** The `.env` file is ignored by Git (`.env` is in `.gitignore`), so your actual API keys are **not** pushed to GitHub. They are only used at build time on your machine.
+Working single-purpose app (TypeScript).
+Because this app handles sensitive safety reports, verify data-retention,
+access-control, and report-validation behavior before any use beyond
+personal testing.
